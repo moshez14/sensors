@@ -1,0 +1,57 @@
+name: Build and Push to GHCR
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/moshez14/mai-sensor-alert
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get short commit SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            {
+              echo "list<<EOF"
+              echo "${IMAGE}:latest"
+              echo "${IMAGE}:${{ steps.sha.outputs.short }}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "list<<EOF"
+              echo "${IMAGE}:develop"
+              echo "${IMAGE}:${{ steps.sha.outputs.short }}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.CR_PAT }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.list }}

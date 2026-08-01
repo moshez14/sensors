@@ -1,12 +1,10 @@
-import datetime
 import json
 import logging
 import os
 import re
-import subprocess
 import unicodedata
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -16,8 +14,7 @@ load_dotenv()
 
 HOST = os.getenv("HOST", "localhost")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "5800"))
-API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api").rstrip("/")
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017/MAI")
+READDB_BASE_URL = os.getenv("READDB_BASE_URL", "http://localhost:5500").rstrip("/")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,12 +24,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-
-def get_notification_sound(action_status: str) -> str:
-    if action_status == "initiated":
-        return "attention-cam.mp3"
-    return "regular-cam.mp3"
 
 
 def parse_raw_message(raw_message: str) -> Optional[Dict[str, Any]]:
@@ -98,155 +89,116 @@ def build_sensor_candidates(sensor_name: str) -> list[str]:
     return deduped
 
 
-def run_mongo_eval(js_code: str) -> Optional[str]:
+def _extract_id(value: Any) -> Optional[str]:
+    if isinstance(value, dict):
+        return value.get("$oid")
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def fetch_all_sensors() -> List[Dict[str, Any]]:
+    url = f"{READDB_BASE_URL}/get_sensors"
     try:
-        result = subprocess.run(
-            ["mongosh", "--quiet", MONGODB_URI, "--eval", js_code],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except Exception as exc:
-        logger.error("Mongo shell execution failed: %s", exc)
-        return None
+        response = requests.get(url, timeout=10)
+    except requests.exceptions.RequestException as exc:
+        logger.error("Failed to reach readDB get_sensors: %s", exc)
+        return []
 
-    if result.returncode != 0:
-        logger.error("Mongo shell returned %s: %s", result.returncode, result.stderr.strip())
-        return None
+    if response.status_code == 404:
+        return []
 
-    return result.stdout.strip()
+    try:
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        logger.error("readDB get_sensors returned an error: %s", exc)
+        return []
+
+    try:
+        return response.json().get("sensors", [])
+    except ValueError:
+        logger.error("Failed to parse readDB get_sensors response: %s", response.text)
+        return []
 
 
 def resolve_sensor_context(sensor_name: str) -> Optional[Dict[str, Any]]:
-    candidates = build_sensor_candidates(sensor_name)
-    candidates_json = json.dumps(candidates, ensure_ascii=False)
-    js_code = f"""
-const names = {candidates_json};
-const sensors = db.sensors.find(
-  {{
-    isDeleted: false,
-    $or: [
-      {{ name: {{ $in: names }} }},
-      {{ nameOnTheMap: {{ $in: names }} }}
+    candidates = set(build_sensor_candidates(sensor_name))
+
+    matches = [
+        sensor
+        for sensor in fetch_all_sensors()
+        if not sensor.get("isDeleted")
+        and (sensor.get("name") in candidates or sensor.get("nameOnTheMap") in candidates)
     ]
-  }},
-  {{
-    _id: 1,
-    name: 1,
-    nameOnTheMap: 1,
-    companyId: 1,
-    clientId: 1,
-    stakeHolderType: 1,
-    createdBy: 1
-  }}
-).toArray();
 
-const sensor = sensors.sort((a, b) => {{
-  const rank = (doc) => [
-    doc.companyId ? 1 : 0,
-    doc.clientId ? 1 : 0,
-    doc.stakeHolderType ? 1 : 0,
-  ];
-  const aRank = rank(a);
-  const bRank = rank(b);
-  for (let i = 0; i < aRank.length; i += 1) {{
-    if (aRank[i] !== bRank[i]) {{
-      return bRank[i] - aRank[i];
-    }}
-  }}
-  return 0;
-}})[0] || null;
-
-print(JSON.stringify(sensor));
-"""
-    output = run_mongo_eval(js_code)
-    if not output:
+    if not matches:
+        logger.warning("Sensor context not found for %s (candidates=%s)", sensor_name, sorted(candidates))
         return None
 
-    try:
-        sensor = json.loads(output)
-    except json.JSONDecodeError:
-        logger.error("Failed to parse sensor context JSON: %s", output)
-        return None
+    def rank(doc: Dict[str, Any]) -> tuple:
+        return (
+            1 if doc.get("companyId") else 0,
+            1 if doc.get("clientId") else 0,
+            1 if doc.get("stakeHolderType") else 0,
+        )
 
-    if not sensor:
-        logger.warning("Sensor context not found for %s (candidates=%s)", sensor_name, candidates)
-        return None
+    best = max(matches, key=rank)
 
-    return sensor
+    return {
+        "_id": _extract_id(best.get("_id")),
+        "name": best.get("name"),
+        "nameOnTheMap": best.get("nameOnTheMap"),
+        "companyId": _extract_id(best.get("companyId")),
+        "clientId": _extract_id(best.get("clientId")),
+        "stakeHolderType": best.get("stakeHolderType"),
+        "createdBy": _extract_id(best.get("createdBy")),
+    }
 
 
 def log_sensor_alert(sensor_name: str, action_status: str, message: str) -> None:
-    sensor_context = resolve_sensor_context(sensor_name)
-    if not sensor_context:
-        logger.error("Skipping sensor log because sensor context could not be resolved for %s", sensor_name)
-        return
-
-    url = f"{API_BASE_URL}/sensor-logs/create"
-    notification_sound = get_notification_sound(action_status)
+    url = f"{READDB_BASE_URL}/add_sensor_log"
     payload = {
-        "sensorId": sensor_context.get("_id"),
-        "companyId": sensor_context.get("companyId"),
-        "clientId": sensor_context.get("clientId"),
-        "stakeHolderType": sensor_context.get("stakeHolderType"),
-        "createdBy": sensor_context.get("createdBy"),
-        "updatedBy": sensor_context.get("createdBy"),
+        "sensor_name": sensor_name,
         "actionStatus": action_status,
-        "notificationSound": notification_sound,
         "message": message,
     }
     logger.info("Payload=%s", payload)
 
     try:
-        response = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
         logger.error("Error logging sensor alert for %s: %s", sensor_name, exc)
 
 
-def update_sensor(sensor_name: str, phone_number: str, action_status: str, received_at: str) -> Optional[Dict[str, Any]]:
+def update_sensor(sensor_name: str, phone_number: str, action_status: str) -> Optional[Dict[str, Any]]:
     sensor_context = resolve_sensor_context(sensor_name)
     if not sensor_context:
         logger.error("Skipping sensor update because sensor context could not be resolved for %s", sensor_name)
         return None
 
-    sensor_id = sensor_context.get("_id")
-    updated_by = sensor_context.get("createdBy")
-    updated_by_js = f'ObjectId("{updated_by}")' if updated_by else "null"
-    js_code = f"""
-const result = db.sensors.updateOne(
-  {{ _id: ObjectId("{sensor_id}"), isDeleted: false }},
-  {{
-    $set: {{
-      actionStatus: "{action_status}",
-      updatedAt: new Date("{received_at}"),
-      updatedBy: {updated_by_js}
-    }}
-  }}
-);
-print(JSON.stringify({{
-  matchedCount: result.matchedCount,
-  modifiedCount: result.modifiedCount,
-  sensorId: "{sensor_id}",
-  phoneNumber: {json.dumps(phone_number)}
-}}));
-"""
-    output = run_mongo_eval(js_code)
-    if not output:
+    url = f"{READDB_BASE_URL}/update_sensor"
+    payload = {
+        "sensor_name": sensor_context.get("name"),
+        "actionStatus": action_status,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        logger.error("Error updating sensor %s via readDB: %s", sensor_name, exc)
         return None
 
     try:
-        parsed_output = json.loads(output)
-    except json.JSONDecodeError:
-        logger.error("Failed to parse sensor update response: %s", output)
+        result = response.json()
+    except ValueError:
+        logger.error("Failed to parse readDB update_sensor response: %s", response.text)
         return None
 
-    if parsed_output.get("matchedCount", 0) == 0:
-        logger.error("Sensor %s was not updated because no matching record was found", sensor_name)
-        return None
-
-    return parsed_output
+    result["sensorId"] = sensor_context.get("_id")
+    result["phoneNumber"] = phone_number
+    return result
 
 
 @app.route("/", methods=["GET"])
@@ -293,7 +245,6 @@ def receive_sms():
             sensor_name=parsed["sensor_name"],
             phone_number=phone_number,
             action_status=parsed["actionStatus"],
-            received_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         )
 
         log_sensor_alert(
