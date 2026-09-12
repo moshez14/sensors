@@ -1,0 +1,143 @@
+---
+- name: Deploy and manage sensors server
+  hosts: localhost
+  become: yes
+  vars:
+    sensors_repo: "git@github.com:moshez14/sensors.git"
+    sensors_dir: "/opt/sensors"
+    sensors_user: "sensors"
+    sensors_group: "sensors"
+    venv_path: "{{ sensors_dir }}/venv"
+
+  tasks:
+    - name: Ensure sensors user exists
+      user:
+        name: "{{ sensors_user }}"
+        shell: /bin/bash
+        home: "/home/{{ sensors_user }}"
+        createhome: yes
+        state: present
+
+    - name: Ensure sensors directory exists
+      file:
+        path: "{{ sensors_dir }}"
+        state: directory
+        owner: "{{ sensors_user }}"
+        group: "{{ sensors_group }}"
+        mode: '0755'
+
+    - name: Clone/update sensors repository
+      git:
+        repo: "{{ sensors_repo }}"
+        dest: "{{ sensors_dir }}"
+        version: main
+        update: yes
+        force: yes
+
+    - name: Fix sensors directory permissions
+      file:
+        path: "{{ sensors_dir }}"
+        state: directory
+        owner: "{{ sensors_user }}"
+        group: "{{ sensors_group }}"
+        mode: '0755'
+        recurse: yes
+
+    - name: Create Python virtual environment
+      command:
+        cmd: "python3.12 -m venv {{ venv_path }}"
+        creates: "{{ venv_path }}/bin/python"
+
+    - name: Fix venv permissions
+      file:
+        path: "{{ venv_path }}"
+        owner: "{{ sensors_user }}"
+        group: "{{ sensors_group }}"
+        mode: '0755'
+        recurse: yes
+
+    - name: Install Python dependencies
+      pip:
+        requirements: "{{ sensors_dir }}/requirements.txt"
+        virtualenv: "{{ venv_path }}"
+        virtualenv_python: python3.12
+
+    - name: Create systemd service for sensors
+      copy:
+        dest: /etc/systemd/system/sensors.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Sensors Alert Server
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User={{ sensors_user }}
+          Group={{ sensors_group }}
+          WorkingDirectory={{ sensors_dir }}
+          ExecStart={{ venv_path }}/bin/python3 server_sensor_alert.py
+          Restart=on-failure
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+      notify: reload systemd
+
+    - name: Enable and start sensors service
+      systemd:
+        name: sensors
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Create git state enforcement script
+      copy:
+        dest: /usr/local/bin/enforce-sensors-state.sh
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -e
+          
+          SENSORS_DIR="{{ sensors_dir }}"
+          SENSORS_USER="{{ sensors_user }}"
+          REPO_URL="{{ sensors_repo }}"
+          
+          cd "$SENSORS_DIR"
+          
+          # Check for uncommitted changes
+          if ! sudo -u $SENSORS_USER git status --porcelain | grep -q .; then
+              exit 0  # No changes
+          fi
+          
+          # Log the changes that were made
+          echo "$(date): Detected changes in $SENSORS_DIR" >> /var/log/sensors-enforcement.log
+          sudo -u $SENSORS_USER git status >> /var/log/sensors-enforcement.log
+          
+          # Reset to original state
+          echo "$(date): Restoring original configuration" >> /var/log/sensors-enforcement.log
+          sudo -u $SENSORS_USER git checkout -- .
+          sudo -u $SENSORS_USER git clean -fd
+          
+          # Ensure service is running
+          systemctl restart sensors
+          
+          echo "$(date): Sensors service restored" >> /var/log/sensors-enforcement.log
+
+    - name: Create monitoring cron job (enforce git state every 5 minutes)
+      cron:
+        name: "Sensors git state enforcement"
+        minute: "*/5"
+        hour: "*"
+        job: "/usr/local/bin/enforce-sensors-state.sh"
+        user: root
+        state: present
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
