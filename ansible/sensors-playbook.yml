@@ -26,13 +26,6 @@
         group: "{{ sensors_group }}"
       ignore_errors: yes
 
-    - name: Add safe directory for git (root)
-      command:
-        cmd: "git config --global --add safe.directory {{ sensors_dir }}"
-      environment:
-        HOME: /root
-      ignore_errors: yes
-
     - name: Add safe directory for git (sensors user)
       command:
         cmd: "git config --global --add safe.directory {{ sensors_dir }}"
@@ -46,6 +39,7 @@
         version: main
         update: yes
         force: yes
+      become_user: "{{ sensors_user }}"
 
     - name: Fix sensors directory permissions
       file:
@@ -60,6 +54,7 @@
       command:
         cmd: "python3.12 -m venv {{ venv_path }}"
         creates: "{{ venv_path }}/bin/python"
+      become_user: "{{ sensors_user }}"
 
     - name: Fix venv permissions
       file:
@@ -74,6 +69,7 @@
         requirements: "{{ sensors_dir }}/requirements.txt"
         virtualenv: "{{ venv_path }}"
         virtualenv_python: python3.12
+      become_user: "{{ sensors_user }}"
 
     - name: Create systemd service for sensors
       copy:
