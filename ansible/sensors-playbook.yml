@@ -8,6 +8,7 @@
     sensors_user: "maifocus"
     sensors_group: "maifocus"
     venv_path: "{{ sensors_dir }}/venv"
+    python_version: "python3.11"
 
   tasks:
     - name: Ensure sensors directory exists
@@ -52,7 +53,7 @@
 
     - name: Create Python virtual environment
       command:
-        cmd: "python3.12 -m venv {{ venv_path }}"
+        cmd: "{{ python_version }} -m venv {{ venv_path }}"
         creates: "{{ venv_path }}/bin/python"
       become_user: "{{ sensors_user }}"
 
@@ -68,7 +69,7 @@
       pip:
         requirements: "{{ sensors_dir }}/requirements.txt"
         virtualenv: "{{ venv_path }}"
-        virtualenv_python: python3.12
+        virtualenv_python: "{{ python_version }}"
       become_user: "{{ sensors_user }}"
 
     - name: Create systemd service for sensors
