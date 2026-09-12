@@ -130,7 +130,7 @@
           
           cd "$SENSORS_DIR"
           
-          # Check for uncommitted changes
+          # Check for any changes (modified, deleted, or untracked files)
           if ! sudo -u $SENSORS_USER git status --porcelain 2>/dev/null | grep -q .; then
               exit 0  # No changes
           fi
@@ -141,7 +141,11 @@
           
           # Reset to original state
           echo "$(date): Restoring original configuration" >> /var/log/sensors-enforcement.log
-          sudo -u $SENSORS_USER git checkout -- . 2>/dev/null || true
+          
+          # Reset all changes (including deleted files)
+          sudo -u $SENSORS_USER git reset --hard HEAD 2>/dev/null || true
+          
+          # Remove untracked files
           sudo -u $SENSORS_USER git clean -fd 2>/dev/null || true
           
           # Ensure service is running
