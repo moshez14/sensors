@@ -4,7 +4,7 @@
   become: yes
   vars:
     sensors_repo: "git@github.com:moshez14/sensors.git"
-    sensors_dir: "/opt/sensors"
+    sensors_dir: "/home/maifocus/sensors"
     sensors_user: "sensors"
     sensors_group: "sensors"
     venv_path: "{{ sensors_dir }}/venv"
