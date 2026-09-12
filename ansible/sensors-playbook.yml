@@ -5,19 +5,11 @@
   vars:
     sensors_repo: "git@github.com:moshez14/sensors.git"
     sensors_dir: "/home/maifocus/sensors"
-    sensors_user: "sensors"
-    sensors_group: "sensors"
+    sensors_user: "maifocus"
+    sensors_group: "maifocus"
     venv_path: "{{ sensors_dir }}/venv"
 
   tasks:
-    - name: Ensure sensors user exists
-      user:
-        name: "{{ sensors_user }}"
-        shell: /bin/bash
-        home: "/home/{{ sensors_user }}"
-        createhome: yes
-        state: present
-
     - name: Ensure sensors directory exists
       file:
         path: "{{ sensors_dir }}"
@@ -100,7 +92,7 @@
           Group={{ sensors_group }}
           WorkingDirectory={{ sensors_dir }}
           ExecStart={{ venv_path }}/bin/python3 server_sensor_alert.py
-          Restart=on-failure
+          Restart=always
           RestartSec=10
           
           [Install]
@@ -153,12 +145,39 @@
           
           echo "$(date): Sensors service restored" >> /var/log/sensors-enforcement.log
 
+    - name: Create service health check script
+      copy:
+        dest: /usr/local/bin/ensure-sensors-running.sh
+        owner: root
+        group: root
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          
+          SERVICE_NAME="sensors"
+          
+          # Check if service is running
+          if ! systemctl is-active --quiet $SERVICE_NAME; then
+              echo "$(date): Service $SERVICE_NAME is not running, starting it..." >> /var/log/sensors-enforcement.log
+              systemctl start $SERVICE_NAME
+              echo "$(date): Service $SERVICE_NAME started" >> /var/log/sensors-enforcement.log
+          fi
+
     - name: Create monitoring cron job (enforce git state every 5 minutes)
       cron:
         name: "Sensors git state enforcement"
         minute: "*/5"
         hour: "*"
         job: "/usr/local/bin/enforce-sensors-state.sh"
+        user: root
+        state: present
+
+    - name: Create health check cron job (ensure service is running every minute)
+      cron:
+        name: "Sensors service health check"
+        minute: "*"
+        hour: "*"
+        job: "/usr/local/bin/ensure-sensors-running.sh"
         user: root
         state: present
 
