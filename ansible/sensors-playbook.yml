@@ -26,6 +26,27 @@
         group: "{{ sensors_group }}"
         mode: '0755'
 
+    - name: Fix git ownership issue
+      file:
+        path: "{{ sensors_dir }}/.git"
+        recurse: yes
+        owner: "{{ sensors_user }}"
+        group: "{{ sensors_group }}"
+      ignore_errors: yes
+
+    - name: Add safe directory for git (root)
+      command:
+        cmd: "git config --global --add safe.directory {{ sensors_dir }}"
+      environment:
+        HOME: /root
+      ignore_errors: yes
+
+    - name: Add safe directory for git (sensors user)
+      command:
+        cmd: "git config --global --add safe.directory {{ sensors_dir }}"
+      become_user: "{{ sensors_user }}"
+      ignore_errors: yes
+
     - name: Clone/update sensors repository
       git:
         repo: "{{ sensors_repo }}"
@@ -110,18 +131,18 @@
           cd "$SENSORS_DIR"
           
           # Check for uncommitted changes
-          if ! sudo -u $SENSORS_USER git status --porcelain | grep -q .; then
+          if ! sudo -u $SENSORS_USER git status --porcelain 2>/dev/null | grep -q .; then
               exit 0  # No changes
           fi
           
           # Log the changes that were made
           echo "$(date): Detected changes in $SENSORS_DIR" >> /var/log/sensors-enforcement.log
-          sudo -u $SENSORS_USER git status >> /var/log/sensors-enforcement.log
+          sudo -u $SENSORS_USER git status >> /var/log/sensors-enforcement.log 2>&1
           
           # Reset to original state
           echo "$(date): Restoring original configuration" >> /var/log/sensors-enforcement.log
-          sudo -u $SENSORS_USER git checkout -- .
-          sudo -u $SENSORS_USER git clean -fd
+          sudo -u $SENSORS_USER git checkout -- . 2>/dev/null || true
+          sudo -u $SENSORS_USER git clean -fd 2>/dev/null || true
           
           # Ensure service is running
           systemctl restart sensors
