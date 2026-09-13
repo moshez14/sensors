@@ -16,6 +16,12 @@ HOST = os.getenv("HOST", "localhost")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "5800"))
 READDB_BASE_URL = os.getenv("READDB_BASE_URL", "http://localhost:5500").rstrip("/")
 
+# Forward the original SMS HTTP request exactly as received.
+FORWARD_SMS_URL = os.getenv(
+    "FORWARD_SMS_URL",
+    "https://bsh.maifocus.com/sms"
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -24,6 +30,69 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+
+def forward_sms() -> bool:
+    """
+    Forward the exact original HTTP request body to the remote server.
+
+    The raw body is forwarded without converting it to JSON or
+    reconstructing the IncomingXML field.
+
+    This means the receiving server gets the same request payload
+    format as this server received.
+    """
+
+    try:
+        # Preserve the original Content-Type.
+        content_type = request.content_type or ""
+
+        # Get the exact raw request body.
+        #
+        # cache=True ensures Flask keeps the body available for the
+        # remaining local processing.
+        raw_body = request.get_data(cache=True)
+
+        headers = {}
+
+        if content_type:
+            headers["Content-Type"] = content_type
+
+        logger.info(
+            "Forwarding original SMS request to %s "
+            "(Content-Type: %s, Size: %s bytes)",
+            FORWARD_SMS_URL,
+            content_type,
+            len(raw_body),
+        )
+
+        response = requests.post(
+            FORWARD_SMS_URL,
+            data=raw_body,
+            headers=headers,
+            timeout=10,
+        )
+
+        response.raise_for_status()
+
+        logger.info(
+            "Original SMS request successfully forwarded to %s "
+            "(status=%s)",
+            FORWARD_SMS_URL,
+            response.status_code,
+        )
+
+        return True
+
+    except requests.exceptions.RequestException as exc:
+
+        logger.error(
+            "Failed to forward original SMS request to %s: %s",
+            FORWARD_SMS_URL,
+            exc,
+        )
+
+        return False
 
 
 def parse_raw_message(raw_message: str) -> Optional[Dict[str, Any]]:
@@ -209,6 +278,12 @@ def index():
 @app.route("/sms", methods=["POST"])
 def receive_sms():
     try:
+        # IMPORTANT: read and cache the original request body FIRST,
+        # before accessing request.form, which consumes the request
+        # stream. This ensures forward_sms() can still forward the
+        # exact original body later.
+        request.get_data(cache=True)
+
         raw_message = None
         phone_number = None
 
@@ -220,6 +295,9 @@ def receive_sms():
                 phone_number = root.findtext("PhoneNumber")
             except ET.ParseError as exc:
                 logger.error("Failed to parse XML: %s", exc)
+                # Even invalid XML has already been received.
+                # Forward the original request before returning.
+                forward_sms()
                 return jsonify({"status": "error", "message": "Invalid XML format"}), 400
 
         if not raw_message:
@@ -227,6 +305,10 @@ def receive_sms():
             if data:
                 raw_message = data.get("raw_message")
                 phone_number = phone_number or data.get("phone_number")
+
+        # Forward every SMS request exactly as received, regardless of
+        # whether it can be parsed successfully.
+        forward_sms()
 
         if not raw_message:
             return jsonify({"status": "error", "message": "No message content found"}), 400
