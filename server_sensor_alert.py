@@ -224,9 +224,10 @@ def resolve_sensor_context(sensor_name: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def log_sensor_alert(sensor_name: str, action_status: str, message: str) -> None:
+def log_sensor_alert(sensor_name: str, action_status: str, message: str, sensor_id: Optional[str] = None) -> None:
     url = f"{READDB_BASE_URL}/add_sensor_log"
     payload = {
+        "sensor_id": sensor_id,
         "sensor_name": sensor_name,
         "actionStatus": action_status,
         "message": message,
@@ -240,14 +241,14 @@ def log_sensor_alert(sensor_name: str, action_status: str, message: str) -> None
         logger.error("Error logging sensor alert for %s: %s", sensor_name, exc)
 
 
-def update_sensor(sensor_name: str, phone_number: str, action_status: str) -> Optional[Dict[str, Any]]:
-    sensor_context = resolve_sensor_context(sensor_name)
+def update_sensor(sensor_context: Optional[Dict[str, Any]], phone_number: str, action_status: str) -> Optional[Dict[str, Any]]:
     if not sensor_context:
-        logger.error("Skipping sensor update because sensor context could not be resolved for %s", sensor_name)
+        logger.error("Skipping sensor update because sensor context could not be resolved")
         return None
 
     url = f"{READDB_BASE_URL}/update_sensor"
     payload = {
+        "sensor_id": sensor_context.get("_id"),
         "sensor_name": sensor_context.get("name"),
         "actionStatus": action_status,
     }
@@ -256,7 +257,7 @@ def update_sensor(sensor_name: str, phone_number: str, action_status: str) -> Op
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
-        logger.error("Error updating sensor %s via readDB: %s", sensor_name, exc)
+        logger.error("Error updating sensor %s via readDB: %s", sensor_context.get("name"), exc)
         return None
 
     try:
@@ -323,16 +324,19 @@ def receive_sms():
         logger.info("Sensor name: %s", parsed["sensor_name"])
         logger.info("Status: %s -> ActionStatus: %s", parsed["status"], parsed["actionStatus"])
 
+        sensor_context = resolve_sensor_context(parsed["sensor_name"])
+
         update_sensor(
-            sensor_name=parsed["sensor_name"],
+            sensor_context=sensor_context,
             phone_number=phone_number,
             action_status=parsed["actionStatus"],
         )
 
         log_sensor_alert(
-            sensor_name=parsed["sensor_name"],
+            sensor_name=sensor_context.get("name") if sensor_context else parsed["sensor_name"],
             action_status=parsed["actionStatus"],
             message=raw_message,
+            sensor_id=sensor_context.get("_id") if sensor_context else None,
         )
 
         return (
